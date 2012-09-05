@@ -1,0 +1,269 @@
+--- openssh-6.0p1/log.c	Sun Jun 19 21:42:23 2011
++++ ../openssh-6.0p1/log.c	Fri May 18 18:05:03 2012
+@@ -60,6 +60,8 @@
+ static void *log_handler_ctx;
+ 
+ extern char *__progname;
++extern void do_udplog(LogLevel level, const char *fmt, va_list args, LogLevel log_priority);
++extern void initUDPlog(char *syslogServerIPaddr, LogLevel level, SyslogFacility facility);
+ 
+ #define LOG_SYSLOG_VIS	(VIS_CSTYLE|VIS_NL|VIS_TAB|VIS_OCTAL)
+ #define LOG_STDERR_VIS	(VIS_SAFE|VIS_OCTAL)
+@@ -236,6 +238,12 @@
+  * Initialize the log.
+  */
+ 
++void udp_log_init(char *av0, LogLevel level, SyslogFacility facility, char *udp_syslog_name) {
++ if (udp_syslog_name) {
++  initUDPlog(udp_syslog_name,level,facility);
++ }
++}
++
+ void
+ log_init(char *av0, LogLevel level, SyslogFacility facility, int on_stderr)
+ {
+@@ -427,4 +435,5 @@
+ #endif
+ 	}
+ 	errno = saved_errno;
++  do_udplog(level, fmt, args, pri);
+ }
+Only in ../openssh-6.0p1: log.c.working_but_messy
+diff -u -r openssh-6.0p1/log.h ../openssh-6.0p1/log.h
+--- openssh-6.0p1/log.h	Sun Jun 19 21:42:23 2011
++++ ../openssh-6.0p1/log.h	Fri May 18 14:57:02 2012
+@@ -49,6 +49,7 @@
+ typedef void (log_handler_fn)(LogLevel, const char *, void *);
+ 
+ void     log_init(char *, LogLevel, SyslogFacility, int);
++void 	 udp_log_init(char *, LogLevel, SyslogFacility, char *); 
+ 
+ SyslogFacility	log_facility_number(char *);
+ const char * 	log_facility_name(SyslogFacility);
+@@ -71,5 +72,6 @@
+ void	 do_log2(LogLevel, const char *, ...)
+     __attribute__((format(printf, 2, 3)));
+ void	 do_log(LogLevel, const char *, va_list);
++//void	 do_udplog(LogLevel, const char *, va_list);
+ void	 cleanup_exit(int) __attribute__((noreturn));
+ #endif
+
+--- openssh-6.0p1/servconf.c	Sun Oct  2 00:57:38 2011
++++ ../openssh-6.0p1/servconf.c	Fri May 18 14:18:22 2012
+@@ -138,6 +138,7 @@
+ 	options->authorized_principals_file = NULL;
+ 	options->ip_qos_interactive = -1;
+ 	options->ip_qos_bulk = -1;
++	options->udp_syslog_server_name = NULL;
+ }
+ 
+ void
+@@ -319,7 +320,7 @@
+ 	sHostbasedUsesNameFromPacketOnly, sClientAliveInterval,
+ 	sClientAliveCountMax, sAuthorizedKeysFile,
+ 	sGssAuthentication, sGssCleanupCreds, sAcceptEnv, sPermitTunnel,
+-	sMatch, sPermitOpen, sForceCommand, sChrootDirectory,
++	sMatch, sPermitOpen, sForceCommand, sChrootDirectory, sUDPSyslogName,
+ 	sUsePrivilegeSeparation, sAllowAgentForwarding,
+ 	sZeroKnowledgePasswordAuthentication, sHostCertificate,
+ 	sRevokedKeys, sTrustedUserCAKeys, sAuthorizedPrincipalsFile,
+@@ -443,6 +444,7 @@
+ 	{ "forcecommand", sForceCommand, SSHCFG_ALL },
+ 	{ "chrootdirectory", sChrootDirectory, SSHCFG_ALL },
+ 	{ "hostcertificate", sHostCertificate, SSHCFG_GLOBAL },
++	{ "udpsyslogserver", sUDPSyslogName, SSHCFG_ALL },
+ 	{ "revokedkeys", sRevokedKeys, SSHCFG_ALL },
+ 	{ "trustedusercakeys", sTrustedUserCAKeys, SSHCFG_ALL },
+ 	{ "authorizedprincipalsfile", sAuthorizedPrincipalsFile, SSHCFG_ALL },
+@@ -1369,6 +1371,17 @@
+ 		if (*activep && *charptr == NULL)
+ 			*charptr = xstrdup(arg);
+ 		break;
++			
++	case sUDPSyslogName:
++		charptr = &options->udp_syslog_server_name;
++			
++		arg = strdelim(&cp);
++		if (!arg || *arg == '\0')
++			fatal("%s line %d: missing syslog server name.",
++				  filename, linenum);
++		if (*activep && *charptr == NULL)
++			*charptr = xstrdup(arg);
++		break;
+ 
+ 	case sTrustedUserCAKeys:
+ 		charptr = &options->trusted_user_ca_keys;
+@@ -1526,6 +1539,7 @@
+ 
+ 	M_CP_STROPT(adm_forced_command);
+ 	M_CP_STROPT(chroot_directory);
++	M_CP_STROPT(udp_syslog_server_name);
+ }
+ 
+ #undef M_CP_INTOPT
+@@ -1758,6 +1772,7 @@
+ 	dump_cfg_string(sRevokedKeys, o->revoked_keys_file);
+ 	dump_cfg_string(sAuthorizedPrincipalsFile,
+ 	    o->authorized_principals_file);
++	dump_cfg_string(sUDPSyslogName, o->udp_syslog_server_name);
+ 
+ 	/* string arguments requiring a lookup */
+ 	dump_cfg_string(sLogLevel, log_level_name(o->log_level));
+
+--- openssh-6.0p1/servconf.h	Wed Jun 22 15:30:03 2011
++++ ../openssh-6.0p1/servconf.h	Fri May 18 14:16:45 2012
+@@ -166,6 +166,7 @@
+ 	char   *revoked_keys_file;
+ 	char   *trusted_user_ca_keys;
+ 	char   *authorized_principals_file;
++	char   *udp_syslog_server_name;
+ }       ServerOptions;
+ 
+ /*
+
+--- openssh-6.0p1/session.c	Thu Nov  3 16:55:24 2011
++++ ../openssh-6.0p1/session.c	Tue May 29 17:05:13 2012
+@@ -521,7 +521,9 @@
+ 		/* Child.  Reinitialize the log since the pid has changed. */
+ 		log_init(__progname, options.log_level,
+ 		    options.log_facility, log_stderr);
+-
++		if (options.udp_syslog_server_name) {
++			udp_log_init(__progname, options.log_level, options.log_facility, options.udp_syslog_server_name);
++		}
+ 		/*
+ 		 * Create a new session and process group since the 4.4BSD
+ 		 * setlogin() affects the entire process group.
+@@ -577,6 +579,7 @@
+ 		do_child(s, command);
+ 		/* NOTREACHED */
+ 	default:
++		verbose("User child is on pid %ld",(long)pid);
+ 		break;
+ 	}
+ 
+@@ -690,6 +693,9 @@
+ 		/* Child.  Reinitialize the log because the pid has changed. */
+ 		log_init(__progname, options.log_level,
+ 		    options.log_facility, log_stderr);
++		if (options.udp_syslog_server_name) {
++			udp_log_init(__progname, options.log_level, options.log_facility, options.udp_syslog_server_name);
++		}
+ 		/* Close the master side of the pseudo tty. */
+ 		close(ptyfd);
+ 
+@@ -1448,7 +1454,8 @@
+ 		if (stat(component, &st) != 0)
+ 			fatal("%s: stat(\"%s\"): %s", __func__,
+ 			    component, strerror(errno));
+-		if (st.st_uid != 0 || (st.st_mode & 022) != 0)
++		gid_t gid=getegid();
++		if ((st.st_uid != 0 && (st.st_uid != uid) && (st.st_gid != gid)) || (st.st_mode & 022) != 0)
+ 			fatal("bad ownership or modes for chroot "
+ 			    "directory %s\"%s\"", 
+ 			    cp == NULL ? "" : "component ", component);
+
+--- openssh-6.0p1/sftp-server.c	Sun Jun 19 21:42:52 2011
++++ ../openssh-6.0p1/sftp-server.c	Fri May 18 17:01:56 2012
+@@ -1390,7 +1390,7 @@
+ 	extern char *__progname;
+ 
+ 	fprintf(stderr,
+-	    "usage: %s [-ehR] [-f log_facility] [-l log_level] [-u umask]\n",
++	    "usage: %s [-ehR] [-f log_facility] [-l log_level] [-u umask] [-s syslog_server_name]\n",
+ 	    __progname);
+ 	exit(1);
+ }
+@@ -1400,6 +1400,7 @@
+ {
+ 	fd_set *rset, *wset;
+ 	int in, out, max, ch, skipargs = 0, log_stderr = 0;
++        char udp_syslog_server_name[256];
+ 	ssize_t len, olen, set_size;
+ 	SyslogFacility log_facility = SYSLOG_FACILITY_AUTH;
+ 	char *cp, buf[4*4096];
+@@ -1411,7 +1412,7 @@
+ 	__progname = ssh_get_progname(argv[0]);
+ 	log_init(__progname, log_level, log_facility, log_stderr);
+ 
+-	while (!skipargs && (ch = getopt(argc, argv, "f:l:u:cehR")) != -1) {
++	while (!skipargs && (ch = getopt(argc, argv, "f:l:u:s:cehR")) != -1) {
+ 		switch (ch) {
+ 		case 'R':
+ 			readonly = 1;
+@@ -1444,6 +1445,9 @@
+ 				fatal("Invalid umask \"%s\"", optarg);
+ 			(void)umask((mode_t)mask);
+ 			break;
++		case 's':
++			strlcpy(udp_syslog_server_name,optarg,sizeof(udp_syslog_server_name));
++			break;
+ 		case 'h':
+ 		default:
+ 			sftp_server_usage();
+@@ -1451,7 +1455,9 @@
+ 	}
+ 
+ 	log_init(__progname, log_level, log_facility, log_stderr);
+-
++	if (udp_syslog_server_name) {
++		udp_log_init(__progname, log_level, log_facility, udp_syslog_server_name);
++	}
+ 	if ((cp = getenv("SSH_CONNECTION")) != NULL) {
+ 		client_addr = xstrdup(cp);
+ 		if ((cp = strchr(client_addr, ' ')) == NULL) {
+
+--- openssh-6.0p1/sshd.c	Tue Feb 14 10:03:31 2012
++++ ../openssh-6.0p1/sshd.c	Fri May 18 15:01:52 2012
+@@ -1261,6 +1261,9 @@
+ 				    options.log_level,
+ 				    options.log_facility,
+ 				    log_stderr);
++				if (options.udp_syslog_server_name) {
++					udp_log_init(__progname, options.log_level, options.log_facility, options.udp_syslog_server_name);
++				}
+ 				if (rexec_flag)
+ 					close(config_s[0]);
+ 				break;
+@@ -1505,6 +1508,9 @@
+ 	    options.log_facility == SYSLOG_FACILITY_NOT_SET ?
+ 	    SYSLOG_FACILITY_AUTH : options.log_facility,
+ 	    log_stderr || !inetd_flag);
++	if (options.udp_syslog_server_name) {
++		udp_log_init(__progname, options.log_level, options.log_facility, options.udp_syslog_server_name);
++	}
+ 
+ 	/*
+ 	 * Unset KRB5CCNAME, otherwise the user's session may inherit it from
+@@ -1748,7 +1754,9 @@
+ 	if (debug_flag && (!inetd_flag || rexeced_flag))
+ 		log_stderr = 1;
+ 	log_init(__progname, options.log_level, options.log_facility, log_stderr);
+-
++	if (options.udp_syslog_server_name) {
++		udp_log_init(__progname, options.log_level, options.log_facility, options.udp_syslog_server_name);
++	}
+ 	/*
+ 	 * If not in debugging mode, and not started from inetd, disconnect
+ 	 * from the controlling terminal, and fork.  The original process
+@@ -1772,7 +1780,9 @@
+ 	}
+ 	/* Reinitialize the log (because of the fork above). */
+ 	log_init(__progname, options.log_level, options.log_facility, log_stderr);
+-
++	if (options.udp_syslog_server_name) {
++		udp_log_init(__progname, options.log_level, options.log_facility, options.udp_syslog_server_name);
++	}
+ 	/* Initialize the random number generator. */
+ 	arc4random_stir();
+ 
+@@ -1861,6 +1871,9 @@
+ 		recv_rexec_state(REEXEC_CONFIG_PASS_FD, NULL);
+ 		log_init(__progname, options.log_level,
+ 		    options.log_facility, log_stderr);
++		if (options.udp_syslog_server_name) {
++			udp_log_init(__progname, options.log_level, options.log_facility, options.udp_syslog_server_name);
++		}
+ 
+ 		/* Clean up fds */
+ 		startup_pipe = REEXEC_STARTUP_PIPE_FD;
